@@ -149,6 +149,20 @@ def _inbound(text: str):
     return InboundMessage(wa_user="+5215512345678", text=text, contact_name="Andrés")
 
 
+def test_rate_limiter() -> None:
+    from .ratelimit import RateLimiter
+
+    # por remitente: 3 pasan, el resto se descarta dentro de la ventana
+    rl = RateLimiter(per_sender_max=3, per_sender_window_s=60, global_max=100)
+    assert [rl.allow("+52A", 1000.0) for _ in range(5)] == [True, True, True, False, False]
+    assert rl.allow("+52A", 1061.0) is True  # ventana deslizante: re-permite tras 60s
+    assert rl.allow("+52B", 1000.0) is True  # otro remitente no se ve afectado
+    # dique global: protege aunque el flood venga de muchos números distintos
+    rg = RateLimiter(per_sender_max=100, global_max=5, global_window_s=60)
+    assert [rg.allow(f"+52_{i}", 2000.0) for i in range(7)] == [True] * 5 + [False] * 2
+    print("✓ rate limiter (por remitente + dique global)")
+
+
 def main() -> None:
     test_signature_ok()
     test_signature_disabled()
@@ -156,6 +170,7 @@ def main() -> None:
     test_parse_webhook_batch()
     test_reset_command_detection()
     test_reset_flow()
+    test_rate_limiter()
     test_format_notification()
     print("Todos los tests pasaron ✅")
 

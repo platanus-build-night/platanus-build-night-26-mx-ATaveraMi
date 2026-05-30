@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from fastapi import APIRouter, BackgroundTasks, Header, Request, Response
 
 from .base import InboundMessage, MessageHandler
 from .commands import DEFAULT_RESET_REPLY, ResetHandler, is_reset_command
 from .kapso import KapsoChannel
+from .ratelimit import RateLimiter
 
 logger = logging.getLogger("viviendin.channel.webhook")
 
@@ -32,6 +34,7 @@ def build_webhook_router(
     on_reset: ResetHandler | None = None,
     reset_reply: str = DEFAULT_RESET_REPLY,
     mark_read_typing: bool = True,
+    rate_limiter: RateLimiter | None = None,
 ) -> APIRouter:
     """Construye el ``APIRouter`` del webhook.
 
@@ -48,9 +51,13 @@ def build_webhook_router(
         mark_read_typing: si True (default), al recibir un mensaje lo marca como leído y
             muestra el indicador "escribiendo…" mientras el agente prepara la respuesta.
             El indicador se descarta al enviar la respuesta o tras ~25s (límite de Meta).
+        rate_limiter: protege contra flood (costo de LLM/WhatsApp). Default: uno con límites
+            sensatos. Mensajes que exceden el límite se DESCARTAN (el webhook igual responde
+            200 para no provocar reintentos de Kapso). Pasar ``RateLimiter(...)`` para afinar.
     """
     router = APIRouter()
     route_path = path or channel.settings.kapso_webhook_path
+    limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 
     async def _reply(inbound: InboundMessage, text: str) -> None:
         """Envía ``text`` al usuario, respondiendo por el mismo número del inbound."""
@@ -129,7 +136,12 @@ def build_webhook_router(
             return Response(status_code=400, content="invalid json")
 
         # El payload puede traer varios mensajes en lote ("data": [...]).
+        now = time.monotonic()
         for inbound in channel.parse_webhook(payload):
+            # Rate limit: si excede, se DESCARTA (no se llama al agente). Igual ack 200
+            # abajo para no provocar reintentos de Kapso que empeorarían el flood.
+            if not limiter.allow(inbound.wa_user, now):
+                continue
             background.add_task(_process, inbound)
 
         # 200 inmediato: el procesamiento ocurre en background.
