@@ -34,6 +34,12 @@ Ejemplo (simulador local, sin WhatsApp)::
 """
 
 from .base import Channel, InboundMessage, MessageHandler, OutboundResult
+from .commands import (
+    DEFAULT_RESET_REPLY,
+    RESET_COMMANDS,
+    ResetHandler,
+    is_reset_command,
+)
 from .config import Settings, load_settings
 from .kapso import KapsoChannel, KapsoClient, WindowExpiredError
 from .notifications import (
@@ -56,6 +62,10 @@ __all__ = [
     "WindowExpiredError",
     "SimulatorChannel",
     "build_webhook_router",
+    "RESET_COMMANDS",
+    "DEFAULT_RESET_REPLY",
+    "ResetHandler",
+    "is_reset_command",
     "LeadNotification",
     "format_lead_notification",
     "send_lead_notification",

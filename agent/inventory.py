@@ -115,15 +115,17 @@ class InventoryRepo:
         limit: int = 3,
     ) -> list[dict]:
         is_terreno = _norm(housing_type) == "terreno"
-        loc_terms = [_norm(t) for t in (state, municipality, zone) if t]
+        has_loc = bool(state or municipality or zone)
 
-        scored: list[tuple[int, dict]] = []
+        # (loc_tier, content_score, dr, dp, matches) — loc_tier: 3=zona, 2=municipio, 1=estado
+        cands: list[tuple[int, int, Developer, Development, list]] = []
         for dr in self.developers:
             for dp in dr.developments:
                 if not dp.name:
                     continue
-                if loc_terms and not self._loc_match(dp, loc_terms):
-                    continue
+                loc = self._loc_score(dp, state, municipality, zone)
+                if has_loc and loc is None:
+                    continue  # ni siquiera cae en el estado pedido
                 if housing_type and not self._type_match(dp, housing_type, is_terreno):
                     continue
 
@@ -131,29 +133,58 @@ class InventoryRepo:
                     m for m in dp.models
                     if self._model_ok(m, is_terreno, bedrooms_min, budget_max)
                 ]
-                # Sin modelos parseados o sin match exacto: igual se ofrece si la
-                # ubicación/tipo cuadran (broker → ofrecer y capturar el lead).
-                has_models = bool(dp.models)
-                if has_models and not matches:
+                # Sin modelos parseados: igual se ofrece (broker → ofrecer y capturar el lead).
+                if dp.models and not matches:
                     continue
 
-                # score: más alto = mejor (modelos con precio dentro de presupuesto primero)
-                score = 0
+                content = 0
                 if matches:
-                    score += 2
+                    content += 2
                 if any(m.price is not None for m in matches):
-                    score += 1
+                    content += 1
                 if not dp.price_on_request:
-                    score += 1
-                scored.append((score, self._summary(dr, dp, matches)))
+                    content += 1
+                cands.append((loc or 0, content, dr, dp, matches))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [s for _, s in scored[:limit]]
+        if not cands:
+            return []
+
+        # Jerarquía: si hay resultados en una tier más específica (p.ej. la zona exacta),
+        # NO mezclar las más amplias. Solo se amplía cuando no hay nada más fino.
+        best_tier = max(c[0] for c in cands)
+        tier = sorted(
+            (c for c in cands if c[0] == best_tier), key=lambda c: c[1], reverse=True
+        )
+        return [
+            self._summary(dr, dp, matches, best_tier, zone)
+            for _, _, dr, dp, matches in tier[:limit]
+        ]
 
     # ---- helpers ----
-    def _loc_match(self, dp: Development, terms: list[str]) -> bool:
-        hay = " ".join(_norm(x) for x in (dp.state, dp.municipality, dp.neighborhood))
-        return any(t in hay for t in terms)
+    def _loc_score(
+        self, dp: Development, state, municipality, zone
+    ) -> Optional[int]:
+        """Cercanía a lo pedido: 3=zona/colonia, 2=municipio, 1=estado, None=no cuadra.
+
+        Más específico gana. Evita que un match de estado ("Querétaro") arrastre TODO
+        el estado cuando el comprador pidió una zona concreta (p.ej. "Zibatá").
+        """
+        nb, mun, st = _norm(dp.neighborhood), _norm(dp.municipality), _norm(dp.state)
+        if zone:
+            z = _norm(zone)
+            if z and (z in nb or (nb and nb in z) or z in mun):
+                return 3
+        if municipality:
+            m = _norm(municipality)
+            if m and (m in mun or (mun and mun in m)):
+                return 2
+        if state:
+            s = _norm(state)
+            if s and (s in st or (st and st in s)):
+                return 1
+        if not (zone or municipality or state):
+            return 0
+        return None
 
     def _type_match(self, dp: Development, housing_type: str, is_terreno: bool) -> bool:
         ht = _norm(housing_type)
@@ -185,12 +216,22 @@ class InventoryRepo:
             return f"${dp.price_from:,.0f} MXN"
         return "precio a consultar"
 
-    def _summary(self, dr: Developer, dp: Development, matches: list) -> dict:
+    @staticmethod
+    def _location_match(tier: int, requested_zone) -> str:
+        """Cómo de bien cuadra con lo pedido (el agente lo usa para ser honesto)."""
+        if requested_zone and tier < 3:
+            return "ampliado"  # NO había en la zona pedida; se amplió la búsqueda
+        return {3: "zona_exacta", 2: "mismo_municipio", 1: "mismo_estado"}.get(tier, "general")
+
+    def _summary(
+        self, dr: Developer, dp: Development, matches: list, tier: int, requested_zone
+    ) -> dict:
         best = sorted(
             (m for m in matches if m.price is not None), key=lambda m: m.price
         )
         sample = (best or matches or dp.models)[:2]
         return {
+            "location_match": self._location_match(tier, requested_zone),
             "development_id": dp.id,
             "name": dp.name,
             "developer": dr.name,

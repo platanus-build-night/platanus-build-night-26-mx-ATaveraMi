@@ -87,16 +87,25 @@ def html_to_markdown(html: str) -> str:
     return md[: settings.max_markdown_chars]
 
 
+def _canon_host(host: str) -> str:
+    """Normaliza www.X y X al mismo host (muchos sitios linkean a su variante www)."""
+    return host[4:] if host.startswith("www.") else host
+
+
 def extract_internal_links(html: str, base_url: str) -> set[str]:
-    """Devuelve los links del mismo dominio (sin fragmentos)."""
+    """Devuelve los links del mismo dominio (sin fragmentos).
+
+    Trata www.X y X como el mismo dominio: varios sitios sirven la home en el
+    apex pero linkean a www (o viceversa), y si no se descartarían como externos.
+    """
     tree = HTMLParser(html)
-    base_host = urlparse(base_url).netloc
+    base_host = _canon_host(urlparse(base_url).netloc)
     links: set[str] = set()
     for a in tree.css("a[href]"):
         href = a.attributes.get("href")
         if not href:
             continue
         u = urljoin(base_url, href).split("#")[0]
-        if urlparse(u).netloc == base_host:
+        if _canon_host(urlparse(u).netloc) == base_host:
             links.add(u)
     return links

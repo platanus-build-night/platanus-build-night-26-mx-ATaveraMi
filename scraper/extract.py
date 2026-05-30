@@ -109,6 +109,8 @@ async def llm_discover_links(home_md: str, links: list[str], base_url: str) -> l
     """
     from urllib.parse import urlparse
 
+    from .fetch import _canon_host
+
     if not links:
         return []
     listing = "\n".join(links[:150])
@@ -117,5 +119,5 @@ async def llm_discover_links(home_md: str, links: list[str], base_url: str) -> l
     )
     if not res:
         return []
-    host = urlparse(base_url).netloc
-    return [u for u in res.development_urls if urlparse(u).netloc == host]
+    host = _canon_host(urlparse(base_url).netloc)
+    return [u for u in res.development_urls if _canon_host(urlparse(u).netloc) == host]

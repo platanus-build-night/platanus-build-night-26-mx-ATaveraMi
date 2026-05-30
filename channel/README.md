@@ -42,13 +42,32 @@ app.include_router(build_webhook_router(channel, handler))  # handler = el del a
 El router publica `POST /webhooks/kapso` (configurable). Si el handler devuelve texto,
 se envía como respuesta automáticamente (`auto_reply=True`).
 
+## Comando de reinicio (`/refresh`)
+
+El comprador puede mandar `/refresh` (o `/reiniciar`, `/reset`, `/nuevo`, `/empezar`,
+`/start`, `reiniciar`) para **borrar el contexto que el agente guarda de su conversación**.
+La capa de canal detecta el comando ANTES de pasar el mensaje al agente; tú provees un
+callback `on_reset(wa_user)` que limpia TU estado (historial, slots, etc.):
+
+```python
+async def on_reset(wa_user: str) -> None:
+    sessions.pop(wa_user, None)   # borra lo que el agente guarde de ese usuario
+
+app.include_router(build_webhook_router(channel, handler, on_reset=on_reset))
+```
+
+Al recibir `/refresh`: se ejecuta `on_reset`, el mensaje NO llega al handler, y se responde
+una confirmación (`reset_reply`, personalizable). La lista de comandos vive en
+`channel/commands.py` (`RESET_COMMANDS`). Sin `on_reset`, `/refresh` se trata como mensaje
+normal. Funciona igual en el simulador: `run_repl(handler, on_reset=on_reset)`.
+
 ## Uso con el simulador (sin WhatsApp)
 
 ```python
 import asyncio
 from channel import SimulatorChannel
 
-asyncio.run(SimulatorChannel().run_repl(handler))   # mismo handler del agente
+asyncio.run(SimulatorChannel().run_repl(handler, on_reset=on_reset))  # mismo handler
 ```
 
 ## Notificación del lead (handoff de broker)

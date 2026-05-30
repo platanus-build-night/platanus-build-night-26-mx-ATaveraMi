@@ -113,6 +113,15 @@ await send_lead_notification(channel, LeadNotification(...), load_settings())
 ```
 Cae a template `nuevo_lead_visita` automáticamente si la ventana de 24h está cerrada.
 
+**Comando `/refresh` (reinicio):** el comprador puede mandar `/refresh` (o `/reiniciar`,
+`/reset`, etc.) para borrar SU contexto. Pásale a `build_webhook_router` un `on_reset`:
+```python
+async def on_reset(wa_user: str) -> None:
+    sessions.pop(wa_user, None)   # borra el historial/slots que guardes de ese usuario
+app.include_router(build_webhook_router(channel, handler, on_reset=on_reset))
+```
+El canal detecta el comando, ejecuta `on_reset`, NO llama tu handler y confirma al usuario.
+
 Exports en `channel/__init__.py`: `KapsoChannel`, `SimulatorChannel`, `build_webhook_router`,
 `InboundMessage`, `LeadNotification`, `send_lead_notification`, `load_settings`, `Settings`.
 Config por env (ver `.env.example`). Tests sin red: `python -m channel.test_channel`.

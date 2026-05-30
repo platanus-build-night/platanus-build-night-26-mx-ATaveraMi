@@ -29,10 +29,21 @@ from .webhook import build_webhook_router
 settings = load_settings()
 channel = KapsoChannel(settings)
 
+# Mini "contexto por usuario" SOLO para la demo (cuenta de mensajes). El agente real lo
+# reemplaza por su propio historial de conversación. Demuestra qué borra /refresh.
+_demo_context: dict[str, int] = {}
+
 
 async def echo_handler(msg: InboundMessage) -> str:
+    n = _demo_context.get(msg.wa_user, 0) + 1
+    _demo_context[msg.wa_user] = n
     name = msg.contact_name or "ahí"
-    return f"Hola {name} 👋 Recibí: «{msg.text}». (eco de demo de Viviendin)"
+    return f"Hola {name} 👋 Recibí: «{msg.text}». (mensaje #{n} de esta conversación)"
+
+
+async def reset_context(wa_user: str) -> None:
+    """Borra el contexto que guardamos de este usuario (aquí, el contador de la demo)."""
+    _demo_context.pop(wa_user, None)
 
 
 @asynccontextmanager
@@ -42,7 +53,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Viviendin — Canal WhatsApp (demo)", lifespan=lifespan)
-app.include_router(build_webhook_router(channel, echo_handler))
+app.include_router(build_webhook_router(channel, echo_handler, on_reset=reset_context))
 
 
 @app.get("/health")

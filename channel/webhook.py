@@ -15,6 +15,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Header, Request, Response
 
 from .base import InboundMessage, MessageHandler
+from .commands import DEFAULT_RESET_REPLY, ResetHandler, is_reset_command
 from .kapso import KapsoChannel
 
 logger = logging.getLogger("viviendin.channel.webhook")
@@ -28,6 +29,8 @@ def build_webhook_router(
     *,
     path: str | None = None,
     auto_reply: bool = True,
+    on_reset: ResetHandler | None = None,
+    reset_reply: str = DEFAULT_RESET_REPLY,
 ) -> APIRouter:
     """Construye el ``APIRouter`` del webhook.
 
@@ -36,11 +39,44 @@ def build_webhook_router(
         handler: callback del agente ``(InboundMessage) -> Optional[str]``.
         path: ruta del endpoint (default: ``settings.kapso_webhook_path``).
         auto_reply: si True, el texto devuelto por el handler se envía como respuesta.
+        on_reset: callback del agente ``(wa_user) -> None`` que borra el contexto que el
+            agente guarda de ese usuario. Si se pasa, los comandos ``/refresh`` (y
+            sinónimos, ver ``commands.RESET_COMMANDS``) NO llegan al handler: se ejecuta
+            ``on_reset`` y se responde ``reset_reply``.
+        reset_reply: confirmación que se envía tras reiniciar.
     """
     router = APIRouter()
     route_path = path or channel.settings.kapso_webhook_path
 
+    async def _reply(inbound: InboundMessage, text: str) -> None:
+        """Envía ``text`` al usuario, respondiendo por el mismo número del inbound."""
+        result = await channel.send_text(
+            inbound.wa_user,
+            text,
+            reply_to=inbound.message_id,
+            phone_number_id=inbound.phone_number_id,
+        )
+        if not result.ok and inbound.message_id:
+            # Reintentar sin "quote": el context puede fallar si el mensaje citado expiró.
+            logger.warning("Reintentando respuesta sin quote para %s", inbound.wa_user)
+            result = await channel.send_text(
+                inbound.wa_user, text, phone_number_id=inbound.phone_number_id
+            )
+        if not result.ok:
+            logger.error("No se pudo responder a %s: %s", inbound.wa_user, result.error)
+
     async def _process(inbound: InboundMessage) -> None:
+        # Comando de reinicio: limpia el contexto del agente y confirma, sin invocar al agente.
+        if on_reset is not None and is_reset_command(inbound.text):
+            try:
+                await on_reset(inbound.wa_user)
+            except Exception:
+                logger.exception("Error reiniciando el contexto de %s", inbound.wa_user)
+            logger.info("Conversación reiniciada para %s", inbound.wa_user)
+            if auto_reply:
+                await _reply(inbound, reset_reply)
+            return
+
         try:
             reply = await handler(inbound)
         except Exception:  # nunca tirar el background task
@@ -49,20 +85,7 @@ def build_webhook_router(
         if not (auto_reply and reply):
             return
         # Responder por el MISMO número que recibió el mensaje (phone_number_id del inbound).
-        result = await channel.send_text(
-            inbound.wa_user,
-            reply,
-            reply_to=inbound.message_id,
-            phone_number_id=inbound.phone_number_id,
-        )
-        if not result.ok and inbound.message_id:
-            # Reintentar sin "quote": el context puede fallar si el mensaje citado expiró.
-            logger.warning("Reintentando respuesta sin quote para %s", inbound.wa_user)
-            result = await channel.send_text(
-                inbound.wa_user, reply, phone_number_id=inbound.phone_number_id
-            )
-        if not result.ok:
-            logger.error("No se pudo responder a %s: %s", inbound.wa_user, result.error)
+        await _reply(inbound, reply)
 
     @router.post(route_path)
     async def kapso_webhook(  # noqa: D401

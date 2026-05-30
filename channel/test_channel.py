@@ -6,10 +6,12 @@ No requiere Kapso ni conexión (no hace requests salientes).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 
+from .commands import is_reset_command
 from .config import Settings
 from .kapso import KapsoChannel
 from .notifications import LeadNotification, format_lead_notification
@@ -110,11 +112,50 @@ def test_format_notification() -> None:
     print("\n--- ejemplo de notificación interna ---\n" + text + "\n")
 
 
+def test_reset_command_detection() -> None:
+    for cmd in ["/refresh", "/REFRESH", "  /reiniciar ", "/reset", "/nuevo", "reiniciar"]:
+        assert is_reset_command(cmd), cmd
+    for not_cmd in ["hola", "quiero refresh", "/buscar", "", "  "]:
+        assert not is_reset_command(not_cmd), not_cmd
+    print("✓ detección de comando de reinicio")
+
+
+def test_reset_flow() -> None:
+    """Verifica que /refresh limpia el contexto y NO invoca al handler (vía demo_app)."""
+    from . import demo_app
+
+    async def run() -> None:
+        # mensaje normal → crea contexto
+        msg = demo_app._demo_context  # noqa: SLF001
+        m1 = await demo_app.echo_handler(_inbound("Hola"))
+        assert "#1" in m1
+        m2 = await demo_app.echo_handler(_inbound("Sigo aquí"))
+        assert "#2" in m2
+        assert msg.get("+5215512345678") == 2
+        # reinicio → borra contexto
+        await demo_app.reset_context("+5215512345678")
+        assert "+5215512345678" not in msg
+        # tras reinicio, el contador vuelve a empezar
+        m3 = await demo_app.echo_handler(_inbound("Empiezo de nuevo"))
+        assert "#1" in m3
+
+    asyncio.run(run())
+    print("✓ flujo de reinicio (/refresh limpia el contexto)")
+
+
+def _inbound(text: str):
+    from .base import InboundMessage
+
+    return InboundMessage(wa_user="+5215512345678", text=text, contact_name="Andrés")
+
+
 def main() -> None:
     test_signature_ok()
     test_signature_disabled()
     test_parse_inbound()
     test_parse_webhook_batch()
+    test_reset_command_detection()
+    test_reset_flow()
     test_format_notification()
     print("Todos los tests pasaron ✅")
 

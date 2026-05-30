@@ -10,6 +10,7 @@ import asyncio
 from typing import Optional
 
 from .base import Channel, InboundMessage, MessageHandler, OutboundResult
+from .commands import DEFAULT_RESET_REPLY, ResetHandler, is_reset_command
 
 
 class SimulatorChannel(Channel):
@@ -34,10 +35,21 @@ class SimulatorChannel(Channel):
         self._counter += 1
         return OutboundResult(ok=True, message_id=f"sim-{self._counter}")
 
-    async def run_repl(self, handler: MessageHandler) -> None:
-        """Bucle interactivo: cada línea de la terminal es un mensaje del comprador."""
+    async def run_repl(
+        self,
+        handler: MessageHandler,
+        *,
+        on_reset: Optional[ResetHandler] = None,
+        reset_reply: str = DEFAULT_RESET_REPLY,
+    ) -> None:
+        """Bucle interactivo: cada línea de la terminal es un mensaje del comprador.
+
+        ``on_reset``: igual que en el webhook — un ``/refresh`` (o sinónimo) limpia el
+        contexto del agente para ese usuario y responde ``reset_reply``.
+        """
         print("=== Simulador Viviendin (Ctrl-C o 'salir' para terminar) ===")
-        print(f"Hablas como {self.contact_name} ({self.wa_user}).\n")
+        print(f"Hablas como {self.contact_name} ({self.wa_user}).")
+        print("Comando: /refresh para reiniciar la conversación.\n")
         is_new = True
         loop = asyncio.get_event_loop()
         while True:
@@ -50,6 +62,13 @@ class SimulatorChannel(Channel):
                 print("👋 Fin de la simulación.")
                 return
             if not line.strip():
+                continue
+
+            # Comando de reinicio: limpia el contexto del agente y confirma.
+            if on_reset is not None and is_reset_command(line):
+                await on_reset(self.wa_user)
+                is_new = True
+                await self.send_text(self.wa_user, reset_reply)
                 continue
 
             self._counter += 1
