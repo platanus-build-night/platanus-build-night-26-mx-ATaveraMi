@@ -5,6 +5,7 @@ devuelve un objeto Pydantic validado. Todo lo demás es código.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 from google import genai
@@ -59,16 +60,30 @@ Contenido (markdown):
 ---"""
 
 
-async def _generate(prompt: str, schema):
-    resp = await client().aio.models.generate_content(
-        model=settings.gemini_model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-            temperature=0,
-        ),
-    )
+def _is_transient(e: Exception) -> bool:
+    """Rate-limit (429) o indisponibilidad (503) → vale reintentar."""
+    s = str(e).lower()
+    return any(t in s for t in ("429", "503", "resource_exhausted", "unavailable", "rate limit", "overloaded"))
+
+
+async def _generate(prompt: str, schema, retries: int = 2):
+    for attempt in range(retries + 1):
+        try:
+            resp = await client().aio.models.generate_content(
+                model=settings.gemini_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0,
+                ),
+            )
+            break
+        except Exception as e:  # noqa: BLE001
+            if attempt < retries and _is_transient(e):
+                await asyncio.sleep(3 * (4 ** attempt))  # 3s, 12s
+                continue
+            raise
     if getattr(resp, "parsed", None) is not None:
         return resp.parsed
     # Fallback: parsear el texto crudo

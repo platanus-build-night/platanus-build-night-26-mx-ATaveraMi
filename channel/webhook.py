@@ -31,6 +31,7 @@ def build_webhook_router(
     auto_reply: bool = True,
     on_reset: ResetHandler | None = None,
     reset_reply: str = DEFAULT_RESET_REPLY,
+    mark_read_typing: bool = True,
 ) -> APIRouter:
     """Construye el ``APIRouter`` del webhook.
 
@@ -44,6 +45,9 @@ def build_webhook_router(
             sinónimos, ver ``commands.RESET_COMMANDS``) NO llegan al handler: se ejecuta
             ``on_reset`` y se responde ``reset_reply``.
         reset_reply: confirmación que se envía tras reiniciar.
+        mark_read_typing: si True (default), al recibir un mensaje lo marca como leído y
+            muestra el indicador "escribiendo…" mientras el agente prepara la respuesta.
+            El indicador se descarta al enviar la respuesta o tras ~25s (límite de Meta).
     """
     router = APIRouter()
     route_path = path or channel.settings.kapso_webhook_path
@@ -65,7 +69,21 @@ def build_webhook_router(
         if not result.ok:
             logger.error("No se pudo responder a %s: %s", inbound.wa_user, result.error)
 
+    async def _mark_read(inbound: InboundMessage) -> None:
+        """Marca el mensaje como leído (palomita azul) + indicador 'escribiendo…'."""
+        if not (mark_read_typing and inbound.message_id):
+            return
+        try:
+            await channel.mark_read(
+                inbound.message_id, typing=True, phone_number_id=inbound.phone_number_id
+            )
+        except Exception:  # nunca bloquear el procesamiento por esto
+            logger.debug("No se pudo marcar leído/typing para %s", inbound.wa_user)
+
     async def _process(inbound: InboundMessage) -> None:
+        # Acusar recibo: leído + "escribiendo…" mientras se prepara la respuesta.
+        await _mark_read(inbound)
+
         # Comando de reinicio: limpia el contexto del agente y confirma, sin invocar al agente.
         if on_reset is not None and is_reset_command(inbound.text):
             try:

@@ -30,10 +30,19 @@ def main() -> None:
     ap.add_argument("--leads", default="data/leads.json")
     args = ap.parse_args()
 
-    repo = InventoryRepo.from_paths([p.strip() for p in args.inventory.split(",")])
+    backend = os.getenv("INVENTORY_BACKEND", "supabase" if os.getenv("SUPABASE_DB_URL") else "json")
+    if backend == "supabase":
+        from db.store import SupabaseLeadRepo, load_inventory_repo
+
+        repo = load_inventory_repo()
+        leads_repo = SupabaseLeadRepo()
+        source = "Supabase"
+    else:
+        repo = InventoryRepo.from_paths([p.strip() for p in args.inventory.split(",")])
+        leads_repo = LeadRepo(args.leads)
+        source = args.inventory
     n_dev = sum(len(d.developments) for d in repo.developers)
-    print(f"Inventario: {len(repo.developers)} desarrolladoras · {n_dev} desarrollos "
-          f"(de {args.inventory})\n")
+    print(f"Inventario: {len(repo.developers)} desarrolladoras · {n_dev} desarrollos (de {source})\n")
 
     settings = load_settings()
     # En el simulador no hay número interno real: lo apuntamos a uno demo para que la
@@ -42,7 +51,7 @@ def main() -> None:
         settings = settings.model_copy(update={"internal_notify_number": "+5215500000001"})
 
     channel = SimulatorChannel()
-    handler = build_handler(repo, LeadRepo(args.leads), channel, settings)
+    handler = build_handler(repo, leads_repo, channel, settings)
     asyncio.run(channel.run_repl(handler))
 
 

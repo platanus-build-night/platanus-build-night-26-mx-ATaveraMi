@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 
 import psycopg
@@ -23,10 +24,40 @@ load_dotenv()
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+# Enums permitidos por los CHECK del schema. La data del scraper es ruidosa
+# (p.ej. availability="preventa"/"vendido", housing_type="mixto" en un modelo),
+# así que saneamos a un valor válido o null antes de insertar.
+DEV_HOUSING = {"casa", "departamento", "terreno", "mixto"}
+DEV_STATUS = {"preventa", "construccion", "entrega_inmediata", "terminado"}
+MODEL_HOUSING = {"casa", "departamento", "terreno"}
+MODEL_AVAIL = {"disponible", "pocas_unidades", "agotado"}
+
+
+def _enum(value, allowed: set):
+    """Devuelve el valor si está en el enum permitido; si no, null."""
+    return value if value in allowed else None
+
+
+def _conn_kwargs(db_url: str) -> dict:
+    """Parsea la connection string manualmente y devuelve kwargs para psycopg.
+
+    Evita el parser de URI estándar: las passwords de Supabase suelen traer
+    caracteres especiales (( [ ] @ etc.) que romperían el parseo o exigirían
+    URL-encoding. Aquí la password se pasa LITERAL a psycopg.
+    """
+    url = db_url.split("?", 1)[0]
+    # postgresql://USER:PASSWORD@HOST:PORT/DB   (PASSWORD greedy hasta el último @)
+    m = re.match(r"^postgres(?:ql)?://([^:/@]+):(.*)@([^:@/]+):(\d+)/([^/?]+)$", url)
+    if not m:
+        raise SystemExit("No pude parsear SUPABASE_DB_URL. Formato esperado: postgresql://user:pass@host:port/db")
+    user, pwd, host, port, db = m.groups()
+    return dict(host=host, port=int(port), user=user, password=pwd, dbname=db, sslmode="require")
+
 
 def _dev_params(dv: dict) -> dict:
     return {
-        "name": dv.get("name"),
+        # name es NOT NULL; los failed/skipped no traen nombre → fallback al website
+        "name": dv.get("name") or dv.get("website"),
         "website": dv.get("website"),
         "phone": dv.get("phone"),
         "email": dv.get("email"),
@@ -45,8 +76,8 @@ def _development_params(d: dict, developer_id) -> dict:
     return {
         "developer_id": developer_id,
         "name": d.get("name"),
-        "housing_type": d.get("housing_type"),
-        "status": d.get("status"),
+        "housing_type": _enum(d.get("housing_type"), DEV_HOUSING),
+        "status": _enum(d.get("status"), DEV_STATUS),
         "state": d.get("state"),
         "municipality": d.get("municipality"),
         "neighborhood": d.get("neighborhood"),
@@ -66,7 +97,7 @@ def _model_params(m: dict, development_id) -> dict:
     return {
         "development_id": development_id,
         "name": m.get("name"),
-        "housing_type": m.get("housing_type"),
+        "housing_type": _enum(m.get("housing_type"), MODEL_HOUSING),
         "bedrooms": m.get("bedrooms"),
         "bathrooms": m.get("bathrooms"),
         "parking": m.get("parking"),
@@ -74,7 +105,7 @@ def _model_params(m: dict, development_id) -> dict:
         "area_lot_m2": m.get("area_lot_m2"),
         "price": m.get("price"),
         "currency": m.get("currency") or "MXN",
-        "availability": m.get("availability"),
+        "availability": _enum(m.get("availability"), MODEL_AVAIL),
     }
 
 
@@ -116,22 +147,23 @@ values
 """
 
 
-def load(path: str, db_url: str, init: bool) -> None:
+def load(path: str, db_url: str, init: bool, truncate: bool) -> None:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     developers = data["developers"]
 
     # El Transaction pooler de Supabase (pgbouncer, puerto 6543) no soporta prepared
-    # statements ni el query param `pgbouncer=true` (que libpq no entiende). Quitamos el
-    # query string y deshabilitamos prepared statements.
-    conninfo = db_url.split("?")[0]
-
+    # statements; los deshabilitamos. La password se pasa literal vía _conn_kwargs.
     n_dev = n_devel = n_model = 0
-    with psycopg.connect(conninfo, prepare_threshold=None) as conn:
+    with psycopg.connect(**_conn_kwargs(db_url), prepare_threshold=None) as conn:
         with conn.cursor() as cur:
             if init:
                 cur.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
                 conn.commit()
                 print("✓ schema aplicado (db/schema.sql)")
+            if truncate:
+                cur.execute("truncate leads, models, developments, developers restart identity cascade")
+                conn.commit()
+                print("✓ tablas vaciadas (truncate)")
 
             for dv in developers:
                 if not dv.get("website"):
@@ -161,6 +193,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Carga inventario JSON a Supabase")
     ap.add_argument("--input", default="data/scraped.json")
     ap.add_argument("--init", action="store_true", help="crear tablas (schema.sql) antes de cargar")
+    ap.add_argument("--truncate", action="store_true", help="vaciar las tablas antes de cargar")
     args = ap.parse_args()
 
     db_url = os.getenv("SUPABASE_DB_URL")
@@ -170,7 +203,7 @@ def main() -> None:
         raise SystemExit(f"No existe {args.input}")
 
     print(f"Cargando {args.input} → Supabase...")
-    load(args.input, db_url, args.init)
+    load(args.input, db_url, args.init, args.truncate)
 
 
 if __name__ == "__main__":

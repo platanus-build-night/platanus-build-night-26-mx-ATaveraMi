@@ -22,10 +22,20 @@ from .leads import LeadRepo
 
 settings = load_settings()
 channel = KapsoChannel(settings)
-repo = InventoryRepo.from_paths(
-    [p.strip() for p in os.getenv("INVENTORY_PATHS", "data/seed.json").split(",")]
-)
-leads = LeadRepo(os.getenv("LEADS_PATH", "data/leads.json"))
+
+# Backend de datos: Supabase si hay SUPABASE_DB_URL (o INVENTORY_BACKEND=supabase); si no, JSON.
+_backend = os.getenv("INVENTORY_BACKEND", "supabase" if os.getenv("SUPABASE_DB_URL") else "json")
+if _backend == "supabase":
+    from db.store import SupabaseLeadRepo, load_inventory_repo
+
+    repo = load_inventory_repo()
+    leads = SupabaseLeadRepo()
+else:
+    repo = InventoryRepo.from_paths(
+        [p.strip() for p in os.getenv("INVENTORY_PATHS", "data/seed.json").split(",")]
+    )
+    leads = LeadRepo(os.getenv("LEADS_PATH", "data/leads.json"))
+
 handler = build_handler(repo, leads, channel, settings)
 
 
@@ -44,6 +54,7 @@ async def health() -> dict[str, object]:
     return {
         "ok": True,
         "channel": channel.name,
+        "inventory_backend": _backend,
         "developers": len(repo.developers),
         "developments": sum(len(d.developments) for d in repo.developers),
         "phone_number_id_set": bool(settings.kapso_phone_number_id),
