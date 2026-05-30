@@ -1,38 +1,98 @@
-# Andrés Tavera Mihailide — Platanus Build Night — Ciudad de México Project
+<div align="center">
 
-**Current project logo:** project-logo.png
+<img src="./project-logo.png" alt="Viviendin" width="160" />
 
-<img src="./project-logo.png" alt="Project Logo" width="200" />
+# Viviendin
 
-Hacker:
+**Broker inmobiliario de vivienda nueva.**
 
-- Andrés Tavera Mihailide ([@ATaveraMi](https://github.com/ATaveraMi))
+Platanus Build Night — Ciudad de México · Hacker: [Andrés Tavera Mihailide (@ATaveraMi)](https://github.com/ATaveraMi)
 
-Before submitting:
+</div>
 
-- ✅ Set a project name, oneliner and description in build-night-project.json
-- ✅ Provide a 1000x1000 png project logo, max 500kb (project-logo.png)
-- ✅ Provide a concise and to the point readme
+---
 
-## ⚠️ Deploying (Vercel, Render, etc.)
+## Qué es
 
-Deploy platforms like **Vercel**, **Render** or **Netlify** can only connect to
-repositories **you own** — they can't be granted access to this organization repo.
-To deploy while keeping your commits here, mirror your code to a personal repo:
+**Viviendin** es un registro centralizado de vivienda nueva en México, alimentado desde los
+**sitios propios de las desarrolladoras** (extracción con LLM), más un **agente de WhatsApp**
+que entiende qué busca un comprador, le muestra **desarrollos reales** que cumplen sus criterios
+(zona, presupuesto, recámaras, tipo, crédito) y captura un **lead calificado** con fecha de visita.
 
-1. Create a **personal** repository on your own GitHub account.
-2. Point your local `origin` at **both** repos, so a single `git push` updates each one:
+Operamos como **broker**: el agente NO contacta a la desarrolladora. Al cerrar, entrega el lead a
+nuestro equipo —por correo— con el contacto de la desarrolladora y el **mensaje ya redactado**
+para concretar la visita y cobrar comisión.
 
-   ```bash
-   # this org repo (keep it as a push target)...
-   git remote set-url --add --push origin https://github.com/platanus-build-night/platanus-build-night-26-mx-ATaveraMi.git
-   # ...and your personal repo
-   git remote set-url --add --push origin https://github.com/<your-user>/<your-repo>.git
-   ```
+## Cómo funciona
 
-   From now on `git push` sends every commit to **both** repositories.
-3. Connect your deploy service (Vercel, Render, …) to your **personal** repo and deploy from there.
+```
+Desarrolladoras (sitios propios)                     Comprador (WhatsApp)
+        │  scraper (fetch + Gemini Flash)                    │  Kapso (WhatsApp Cloud API)
+        ▼                                                    ▼
+   ┌──────────────────────── Supabase (Postgres) ───────────────────────┐
+   │  developers → developments → models           leads                │
+   └────────────────────────────────────────────────────────────────────┘
+        ▲ escribe inventario                          ▲ lee inventario / escribe leads
+        │                                             │
+   db/load_to_supabase.py                      Agente PydanticAI (Gemini)
+                                                 ├─ entiende y perfila al comprador
+                                                 ├─ 7 tools (búsqueda, panorama, detalle…)
+                                                 └─ create_lead → Supabase + correo al equipo
+```
 
-Your commits stay mirrored here for judging, while the deploy runs from the repo you control.
+- **Inventario:** el scraper recorre la lista de desarrolladoras, extrae con Gemini un JSON con
+  schema fijo y lo sube a Supabase. El agente lee de ahí (no inventa: solo ofrece lo que existe).
+- **Agente:** conversacional en español de México, honesto con ubicación/tipo/zona, propone
+  alternativas cercanas con sentido y nunca alucina desarrollos, zonas ni precios.
+- **Handoff:** al agendar pide nombre (obligatorio) + desarrollo + modelo + fecha tentativa, y
+  manda un correo con el resumen, **a quién escribir** y el **mensaje listo para reenviar**.
 
-Have fun! 🚀
+### Tools del agente
+`find_by_developer` · `inventory_overview` · `list_areas` · `search_inventory` ·
+`get_development_detail` · `get_more_info` (entra al sitio en vivo) · `create_lead`
+
+## Stack
+
+Python · **PydanticAI + Gemini** (agente) · **Gemini Flash** (extracción) · **Supabase/Postgres**
+(inventario + leads) · **Kapso** (WhatsApp Cloud API) · **FastAPI** (webhook) · SMTP (correo del lead).
+
+## Cómo correrlo
+
+```bash
+# 1. Entorno
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # llena GEMINI_API_KEY, SUPABASE_DB_URL, KAPSO_*, SMTP_*
+
+# 2. Inventario → Supabase
+python -m db.load_to_supabase --init                 # crea tablas + carga data/scraped.json
+python -m db.load_to_supabase --input data/seed.json # + el seed (demo CDMX/Querétaro)
+python -m scraper.run --limit 30                     # (opcional) scrapear más sitios
+
+# 3. Probar el agente en local (sin WhatsApp)
+python -m agent.run_simulator    # REPL: escribes como comprador, el agente responde
+
+# 4. Producción (webhook de WhatsApp vía Kapso)
+uvicorn agent.app:app --port 8000
+#   expón con ngrok y registra el webhook en Kapso → <url>/webhooks/kapso
+#   verifica <url>/health
+```
+
+> Sin `SUPABASE_DB_URL` el agente cae a `data/seed.json` local. Deploy listo en `render.yaml`.
+
+## Estructura
+
+| Ruta | Qué es |
+|------|--------|
+| `agent/` | Agente PydanticAI (modelos, repo, tools, conversación, app FastAPI, simulador) |
+| `scraper/` | Extracción de inventario (fetch + Gemini, pipeline de 2 fases) |
+| `channel/` | Capa de canal WhatsApp (Kapso + simulador) y notificación/correo del lead |
+| `db/` | `schema.sql`, loader a Supabase y backend de datos del agente |
+| `data/` | `seed.json` (demo), `desarrolladoras.txt` (lista de sitios) |
+| `PLAN.md` · `DATA_MODEL.md` | Alcance/negocio · contrato de datos |
+
+## Deploy (Build Night)
+
+El repo de la organización no se puede conectar a Render/Vercel. El código se espeja a un repo
+personal ([Rialtor/viviendin](https://github.com/Rialtor/viviendin)) y el deploy corre desde ahí;
+los commits quedan mirrored aquí para evaluación.
