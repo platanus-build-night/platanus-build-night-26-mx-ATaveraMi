@@ -12,6 +12,7 @@ de reinicio ("reset", "reiniciar", …) borra el historial y empieza de cero.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from channel.base import Channel, InboundMessage, MessageHandler
@@ -21,12 +22,32 @@ from .agent import agent
 from .deps import AgentDeps
 from .inventory import InventoryRepo
 from .leads import LeadRepo
-from .sessions import SessionStore
 
 logger = logging.getLogger("viviendin.agent.conversation")
 
-# Store persistente compartido (data/sessions.json). En producción → Redis/Supabase.
-_store = SessionStore()
+
+def _build_store():
+    """Elige backend de historial. Supabase si hay SUPABASE_DB_URL (o SESSIONS_BACKEND=supabase);
+    si no, cae al archivo JSON local (solo para dev sin DB).
+
+    El archivo es efímero (se pierde en redeploys); producción DEBE usar Supabase.
+    """
+    backend = os.getenv(
+        "SESSIONS_BACKEND", "supabase" if os.getenv("SUPABASE_DB_URL") else "json"
+    )
+    if backend == "supabase":
+        from db.sessions_store import SupabaseSessionStore
+
+        logger.info("Historial de conversación: Supabase (agent_sessions)")
+        return SupabaseSessionStore()
+    from .sessions import SessionStore
+
+    logger.warning("Historial de conversación: archivo JSON (efímero; NO usar en prod)")
+    return SessionStore()
+
+
+# Store de historial compartido. Backend según entorno (Supabase en prod).
+_store = _build_store()
 
 # Palabras que reinician la conversación (borran el historial de ese usuario).
 RESET_WORDS = {
@@ -42,7 +63,7 @@ def build_handler(
     leads: LeadRepo,
     channel: Channel,
     settings: Settings,
-    store: Optional[SessionStore] = None,
+    store: object | None = None,
 ) -> MessageHandler:
     store = store or _store
 
@@ -73,6 +94,6 @@ def build_handler(
     return handler
 
 
-def reset_history(wa_user: Optional[str] = None, store: Optional[SessionStore] = None) -> None:
+def reset_history(wa_user: Optional[str] = None, store: object | None = None) -> None:
     """Limpia el historial (de un usuario o de todos). Útil entre pruebas."""
     (store or _store).reset(wa_user)
