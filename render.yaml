@@ -6,15 +6,13 @@
 #    repo personal y conecta Render a ese (ver README.md → "Deploying").
 #
 # Pasos:
-#   1. Mirror del repo a tu cuenta personal de GitHub.
+#   1. Mirror del repo a tu cuenta personal de GitHub (git push a ambos remotes).
 #   2. En Render: New → Blueprint → apunta a tu repo personal (lee este archivo).
 #   3. Llena los secretos (los marcados sync:false) en el dashboard de Render.
 #   4. Toma la URL pública (https://viviendin-whatsapp.onrender.com) y registra el
-#      webhook de Kapso apuntando a  <url>/webhooks/kapso  (events: whatsapp.message.received, v2).
-#
-# Para arrancar: deploya con el ECHO BOT (channel.demo_app) y verifica que llegan webhooks
-# en producción. Cuando el agente esté listo, cambia startCommand al app del agente
-# (p.ej. `uvicorn app:app ...`) que incluye build_webhook_router(channel, handler).
+#      webhook de Kapso apuntando a  <url>/webhooks/kapso
+#      (events: whatsapp.message.received, payload v2).
+#   5. Verifica  <url>/health  → debe responder ok + conteo de inventario.
 
 services:
   - type: web
@@ -23,15 +21,31 @@ services:
     plan: starter          # 'starter' = always-on ($7/mes). 'free' se DUERME y pierde webhooks.
     region: oregon
     branch: main
-    # Echo-bot solo necesita las deps del canal. Cuando se integre el agente, cambiar a
-    # `pip install -r requirements.txt` (un requirements raíz que mezcle canal + agente).
-    buildCommand: pip install -r channel/requirements.txt
-    # ECHO BOT (para validar la conexión). Cambiar a `app:app` (o el módulo del agente) en prod:
-    startCommand: uvicorn channel.demo_app:app --host 0.0.0.0 --port $PORT --workers 2
+    buildCommand: pip install -r requirements.txt
+    # App REAL del agente (webhook Kapso → Agent → respuesta + notificación del lead).
+    # --workers 1 OBLIGATORIO: el historial de conversación vive EN MEMORIA por proceso
+    # (agent/sessions.py). Con 2+ workers, los mensajes de un mismo usuario caerían en
+    # procesos distintos y el agente "olvidaría" la conversación a media charla.
+    startCommand: uvicorn agent.app:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: "3.11.9"
+
+      # --- Inventario ---
+      # Dos backends disponibles (agent/app.py elige por INVENTORY_BACKEND):
+      #   · json     → lee data/seed.json (autocontenido, 12 desarrollos; ideal demo/arranque).
+      #   · supabase → usa db/store.py (requiere SUPABASE_DB_URL + más inventario poblado).
+      # Default 'json' = arranque seguro sin depender del estado de la DB. Para usar Supabase:
+      # cambia a 'supabase' y agrega SUPABASE_DB_URL abajo (sync:false).
+      - key: INVENTORY_BACKEND
+        value: json
+      - key: INVENTORY_PATHS
+        value: data/seed.json
+      # - key: SUPABASE_DB_URL      # descomenta + setea si INVENTORY_BACKEND=supabase
+      #   sync: false
+
+      # --- Kapso (WhatsApp) ---
       - key: KAPSO_API_KEY
         sync: false
       - key: KAPSO_API_BASE_URL
@@ -40,14 +54,16 @@ services:
         value: v24.0
       - key: KAPSO_PHONE_NUMBER_ID
         sync: false
+      # Verificación de firma del webhook. Si se deja sin setear, se OMITE (modo demo).
       - key: KAPSO_WEBHOOK_SECRET
         sync: false
+
+      # --- Agente (Gemini) ---
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: AGENT_MODEL
+        value: gemini-2.5-flash
+
+      # --- Notificación interna del lead (número del equipo, E.164) ---
       - key: INTERNAL_NOTIFY_NUMBER
         sync: false
-      # Cuando el agente esté integrado, agregar aquí sus secretos:
-      # - key: ANTHROPIC_API_KEY
-      #   sync: false
-      # - key: SUPABASE_URL
-      #   sync: false
-      # - key: SUPABASE_KEY
-      #   sync: false

@@ -43,8 +43,32 @@ def _norm(s: Optional[str]) -> str:
     return _LOC_ALIASES.get(base, base)
 
 
+# 32 estados de México (normalizados). El scrapeado trae ruido fuera de MX (Texas,
+# Maldonado…) que NO debe ofrecérsele a un comprador mexicano → se filtra al cargar.
+_MX_STATES = {
+    _norm(s) for s in (
+        "Aguascalientes", "Baja California", "Baja California Sur", "Campeche", "Chiapas",
+        "Chihuahua", "Coahuila", "Colima", "Ciudad de México", "Durango", "Guanajuato",
+        "Guerrero", "Hidalgo", "Jalisco", "México", "Estado de México", "Michoacán",
+        "Morelos", "Nayarit", "Nuevo León", "Oaxaca", "Puebla", "Querétaro", "Quintana Roo",
+        "San Luis Potosí", "Sinaloa", "Sonora", "Tabasco", "Tamaulipas", "Tlaxcala",
+        "Veracruz", "Yucatán", "Zacatecas",
+    )
+}
+
+
+def _is_mx_or_unknown(state: Optional[str]) -> bool:
+    """True si el estado es de México o desconocido (None). False si es claramente extranjero."""
+    if not state:
+        return True  # sin estado: no lo descartamos (puede ser MX sin parsear)
+    return _norm(state) in _MX_STATES
+
+
 class InventoryRepo:
     def __init__(self, developers: list[Developer]) -> None:
+        # Filtra desarrollos claramente fuera de México (ruido del scrapeado: Texas, etc.).
+        for dr in developers:
+            dr.developments = [d for d in dr.developments if _is_mx_or_unknown(d.state)]
         self.developers = developers
         # índices por id para lookups O(1)
         self._dev_by_id: dict[str, Development] = {}
@@ -177,6 +201,31 @@ class InventoryRepo:
             ),
         }
 
+    # ---- búsqueda por desarrolladora / marca ----
+    def find_by_developer(self, query: str, *, limit: int = 6) -> dict:
+        """Busca desarrolladoras por nombre (o dominio) y devuelve sus desarrollos.
+
+        Para "¿tienes algo de Atlas/MiRA/Vinte?". Match por substring sin acentos.
+        """
+        q = _norm(query)
+        if not q:
+            return {"found": False, "developers": []}
+        out: list[dict] = []
+        for dr in self.developers:
+            if q in _norm(dr.name) or (dr.website and q in _norm(dr.website)):
+                devs = [
+                    self._summary(dr, dp, dp.models, 0, None)
+                    for dp in dr.developments if dp.name
+                ]
+                if devs or dr.name:
+                    out.append({
+                        "developer": dr.name,
+                        "website": dr.website,
+                        "n_developments": len(devs),
+                        "developments": devs[:limit],
+                    })
+        return {"found": bool(out), "developers": out[:limit]}
+
     # ---- zonas disponibles (anti-alucinación) ----
     def list_areas(
         self, *, housing_type: Optional[str] = None, state: Optional[str] = None
@@ -283,9 +332,19 @@ class InventoryRepo:
         tier.sort(key=lambda c: (-c[1], self._sort_price(c[3])))
 
         total = len(tier)
+        # Estados presentes en los resultados: si hay >1, la zona es ambigua (p.ej. "Roma"
+        # existe en CDMX y en Monterrey) → el agente debe aclarar de qué ciudad.
+        # Dedup por forma normalizada para no contar "CDMX" y "Ciudad de México" como dos.
+        _seen_states: set[str] = set()
+        states_in_results: list[str] = []
+        for _, _, _, dp, _ in tier:
+            if dp.state and _norm(dp.state) not in _seen_states:
+                _seen_states.add(_norm(dp.state))
+                states_in_results.append(dp.state)
         return {
             "total_matches": total,
             "should_narrow": total > max_show,
+            "states_in_results": states_in_results,
             "results": [
                 self._summary(dr, dp, matches, best_tier, zone)
                 for _, _, dr, dp, matches in tier[:pool]
@@ -383,6 +442,11 @@ class InventoryRepo:
         def _terms(value) -> list[str]:
             return [t for t in (_norm(p) for p in (value or "").split(",")) if t]
 
+        # El ESTADO es filtro DURO cuando se especifica: si no cuadra, fuera — aunque la
+        # zona coincida. Así "Roma CDMX" NUNCA trae la "Roma" de Monterrey.
+        if state and not any((s in st or (st and st in s)) for s in _terms(state)):
+            return None
+
         if zone and any(
             (z in nb or (nb and nb in z) or z in mun) for z in _terms(zone)
         ):
@@ -391,8 +455,8 @@ class InventoryRepo:
             (m in mun or (mun and mun in m)) for m in _terms(municipality)
         ):
             return 2
-        if state and any((s in st or (st and st in s)) for s in _terms(state)):
-            return 1
+        if state:
+            return 1  # el estado ya pasó el filtro duro; sin zona/municipio específico
         if not (zone or municipality or state):
             return 0
         return None
@@ -400,14 +464,15 @@ class InventoryRepo:
     def _type_match(self, dp: Development, housing_type: str, is_terreno: bool) -> bool:
         ht = _norm(housing_type)
         dht = _norm(dp.housing_type)
-        if dht in ("", "mixto"):
-            return True  # mixto/desconocido: no excluir
+        model_types = {_norm(m.housing_type) for m in dp.models if m.housing_type}
+
         if is_terreno:
-            return dht == "terreno"
-        # casa/departamento: aceptar si coincide o si el desarrollo tiene modelos del tipo
-        if dht == ht:
-            return True
-        return any(_norm(m.housing_type) == ht for m in dp.models)
+            return dht == "terreno" or "terreno" in model_types
+        # Requiere EVIDENCIA real del tipo: el tipo del desarrollo, o un modelo de ese tipo.
+        # Sin lenidad de tipo: ofrecer un depto/tipo-desconocido como "casa" es engañoso (y el
+        # comprador lo nota). La lenidad (no descartar por desconocido) aplica a precio/recámaras,
+        # NO al tipo, que es categórico.
+        return dht == ht or ht in model_types
 
     @staticmethod
     def _sort_price(dp: Development) -> float:

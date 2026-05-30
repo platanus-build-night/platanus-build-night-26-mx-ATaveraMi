@@ -20,6 +20,8 @@ from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
 
+from .normalize import normalize_state
+
 load_dotenv()
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -78,7 +80,7 @@ def _development_params(d: dict, developer_id) -> dict:
         "name": d.get("name"),
         "housing_type": _enum(d.get("housing_type"), DEV_HOUSING),
         "status": _enum(d.get("status"), DEV_STATUS),
-        "state": d.get("state"),
+        "state": normalize_state(d.get("state"), d.get("municipality"), d.get("neighborhood")),
         "municipality": d.get("municipality"),
         "neighborhood": d.get("neighborhood"),
         "price_from": d.get("price_from"),

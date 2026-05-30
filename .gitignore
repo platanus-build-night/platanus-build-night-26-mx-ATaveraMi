@@ -9,3 +9,4 @@ data/leads.json
 data/leads_test.json
 data/sessions.json
 data/sessions_test.json
+.claude

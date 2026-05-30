@@ -38,6 +38,20 @@ class Settings(BaseSettings):
     lead_template_name: str = "nuevo_lead_visita"
     lead_template_language: str = "es_MX"
 
+    # --- Correo del lead (documentación + handoff) ---
+    # SMTP para mandar el correo del lead. Para Gmail: host=smtp.gmail.com, port=465,
+    # user=tu-correo, password=App Password (cuenta con 2FA → Contraseñas de aplicación).
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_user: str = ""
+    smtp_password: str = ""
+    lead_email_to: str = ""    # a quién llega el correo del lead (tu correo)
+    lead_email_from: str = ""  # remitente (default: smtp_user)
+
+    @property
+    def email_enabled(self) -> bool:
+        return bool(self.smtp_host and self.smtp_user and self.smtp_password and self.lead_email_to)
+
     def messages_url(self, phone_number_id: str | None = None) -> str:
         """URL del endpoint de envío del proxy Meta de Kapso.
 

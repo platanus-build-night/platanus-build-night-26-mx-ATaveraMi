@@ -13,7 +13,10 @@ texto plano y, si la ventana está cerrada, cae al template automáticamente.
 from __future__ import annotations
 
 import logging
+import smtplib
+import ssl
 from dataclasses import dataclass
+from email.message import EmailMessage
 from typing import Any, Optional
 
 from .base import Channel, OutboundResult
@@ -37,6 +40,7 @@ class LeadNotification:
     horizon: Optional[str] = None
     development_name: Optional[str] = None
     developer_name: Optional[str] = None
+    model_name: Optional[str] = None
     visit_date: Optional[str] = None
     visit_time: Optional[str] = None
     developer_contact: Optional[str] = None
@@ -66,6 +70,7 @@ def format_lead_notification(lead: LeadNotification) -> str:
     horizonte = lead.horizon or "n/d"
     desarrollo = lead.development_name or "(por definir)"
     desarrolladora = f" ({lead.developer_name})" if lead.developer_name else ""
+    modelo = f"\nModelo de interés: {lead.model_name}" if lead.model_name else ""
     visita = " ".join(p for p in (lead.visit_date, lead.visit_time) if p) or "por acordar"
     contacto = lead.developer_contact or "(sin contacto registrado — usar corporativo)"
 
@@ -74,10 +79,69 @@ def format_lead_notification(lead: LeadNotification) -> str:
         f"Comprador: {name} · {lead.wa_user}\n"
         f"Busca: {tipo} en {zona}, {rec}, ~{_money(lead.budget)}, crédito {credito}\n"
         f"Horizonte: {horizonte}\n\n"
-        f"Desarrollo de interés: {desarrollo}{desarrolladora}\n"
+        f"Desarrollo de interés: {desarrollo}{desarrolladora}{modelo}\n"
         f"Visita propuesta: {visita}\n\n"
         f"➡️ Escribir a la desarrolladora: {contacto}"
     )
+
+
+def draft_developer_message(lead: LeadNotification) -> str:
+    """Mensaje YA REDACTADO para que el equipo se lo reenvíe a la desarrolladora."""
+    tipo = lead.housing_type or "vivienda"
+    zona = lead.zone or "la zona de su interés"
+    rec = f", {lead.bedrooms} recámaras" if lead.bedrooms is not None else ""
+    modelo = f" (modelo {lead.model_name})" if lead.model_name else ""
+    presupuesto = f", presupuesto aproximado {_money(lead.budget)}" if lead.budget else ""
+    visita = " ".join(p for p in (lead.visit_date, lead.visit_time) if p) or "por acordar"
+    comprador = lead.buyer_name or "un comprador"
+    return (
+        f"Hola, les escribo de parte de Viviendin (brokeraje de vivienda nueva). "
+        f"Tengo un comprador interesado en {lead.development_name or 'su desarrollo'}{modelo}: "
+        f"{comprador} busca {tipo} en {zona}{rec}{presupuesto}. "
+        f"Le gustaría agendar una visita ({visita}). ¿Podemos coordinarla? "
+        f"Contacto del comprador: {lead.wa_user}. ¡Gracias!"
+    )
+
+
+def format_lead_email(lead: LeadNotification) -> str:
+    """Cuerpo del correo: resumen del lead + a quién escribir + mensaje listo para reenviar."""
+    contacto = lead.developer_contact or "(sin contacto registrado — buscar el corporativo)"
+    return (
+        f"{format_lead_notification(lead)}\n\n"
+        "──────────────────────\n"
+        f"✉️  A QUIÉN ESCRIBIR (desarrolladora): {contacto}\n\n"
+        "📝  MENSAJE SUGERIDO (copia y pega para la desarrolladora):\n"
+        f"{draft_developer_message(lead)}\n"
+    )
+
+
+def send_lead_email(lead: LeadNotification, settings: Settings) -> bool:
+    """Envía el correo del lead por SMTP. Best-effort: loguea y devuelve False si falla."""
+    if not settings.email_enabled:
+        logger.info("Correo del lead no configurado (SMTP_*/LEAD_EMAIL_TO) — se omite.")
+        return False
+    msg = EmailMessage()
+    who = lead.buyer_name or lead.wa_user
+    msg["Subject"] = f"🏠 Nuevo lead Viviendin — {lead.development_name or 'visita'} ({who})"
+    msg["From"] = settings.lead_email_from or settings.smtp_user
+    msg["To"] = settings.lead_email_to
+    msg.set_content(format_lead_email(lead))
+    ctx = ssl.create_default_context()
+    try:
+        if settings.smtp_port == 465:
+            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=ctx) as s:
+                s.login(settings.smtp_user, settings.smtp_password)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as s:
+                s.starttls(context=ctx)
+                s.login(settings.smtp_user, settings.smtp_password)
+                s.send_message(msg)
+        logger.info("Correo del lead enviado a %s", settings.lead_email_to)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("No se pudo enviar el correo del lead: %s", exc)
+        return False
 
 
 def _template_components(text: str) -> list[dict[str, Any]]:

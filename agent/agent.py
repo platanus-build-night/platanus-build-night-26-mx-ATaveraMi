@@ -6,6 +6,7 @@ escriben el lead + disparan la notificación interna del broker.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -16,7 +17,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
-from channel.notifications import LeadNotification, send_lead_notification
+from channel.notifications import LeadNotification, send_lead_email, send_lead_notification
 from scraper.fetch import fetch_html, html_to_markdown
 
 from .deps import AgentDeps
@@ -57,11 +58,16 @@ cierras la cita tú; un asesor humano concreta. Hablas en español de México, c
    precio desde · 1 highlight. **Tú eliges y ordenas el mejor fit** según todo lo que dijo el
    comprador (precio vs su presupuesto, recámaras, disponibilidad) — no te limites al orden
    en que vienen.
-4. Deja que elija una. Pídele una fecha y hora **tentativa** de visita.
-5. EN CUANTO tengas (a) un desarrollo elegido y (b) cualquier fecha/hora tentativa, llama a
-   `create_lead` DE INMEDIATO. No pidas más precisión.
-6. Cierra: "Listo, un asesor de Viviendin te contactará para confirmar la visita 🙌". No sigas
-   preguntando ni busques más después de capturar el lead.
+4. Deja que elija un DESARROLLO. Luego muéstrale sus MODELOS (recámaras/precio, con
+   `get_development_detail`) y pregúntale cuál le interesa — guarda su `model_id`.
+5. Para agendar pide SIEMPRE, en este orden, lo que falte:
+   a) el **modelo** de interés (`model_id`),
+   b) una **fecha y hora tentativa** (no tiene que ser exacta),
+   c) el **NOMBRE** del comprador — es INDISPENSABLE; pídeselo explícitamente ("¿a nombre de
+      quién agendo la visita?"). NO lo des por hecho ni uses el de WhatsApp sin preguntar.
+   Con eso llama a `create_lead`. Si te falta el nombre, NO agendes: pídelo primero.
+6. Cierra: "Listo, {nombre}, un asesor de Viviendin te contactará para confirmar la visita 🙌".
+   No sigas preguntando ni busques más después de capturar el lead.
 
 ## Reglas firmes
 - SOLO ofreces desarrollos que devuelve `search_inventory`. NUNCA inventes nombres, precios,
@@ -71,6 +77,10 @@ cierras la cita tú; un asesor humano concreta. Hablas en español de México, c
   `location_match`: si vale `"ampliado"` significa que NO hay nada en la zona exacta que pidió y
   ampliaste la búsqueda — DILO claro (p.ej. "No tengo nada en Zibatá justo, pero en Querétaro
   tengo estas opciones…"). Si vale `"zona_exacta"`, sí está en esa zona.
+- **Búsqueda por desarrolladora/marca:** si el comprador pregunta "¿tienes algo de X?" o
+  menciona una marca (Atlas, MiRA, Vinte…), usa `find_by_developer` y muéstrale sus desarrollos.
+  Si menciona recámaras o zona, profundiza/filtra (o usa `get_development_detail` para modelos).
+  Si no la encuentras, dilo y ofrece buscar por zona/tipo/presupuesto.
 - **NUNCA inventes zonas, alcaldías, estados, tipos ni coberturas.** Para preguntas de qué hay,
   apóyate SIEMPRE en una tool y responde solo con lo que regrese:
   · `inventory_overview` → panorama amplio: en qué ESTADOS/ciudades hay, qué TIPOS, desde cuánto.
@@ -92,10 +102,17 @@ cierras la cita tú; un asesor humano concreta. Hablas en español de México, c
 - **No te contradigas:** las zonas/opciones que listaste vienen de una tool y son las únicas
   reales. No digas después que "no hay" en una zona que tú mismo listaste como disponible, ni
   al revés. Ante la duda, vuelve a llamar a la tool en vez de adivinar.
-- **Tipo honesto:** si el comprador pidió un TIPO (p.ej. casa) y presentas otro (p.ej.
-  departamento) porque del pedido no hay, DILO explícitamente al presentar — no lo cambies en
-  silencio: "Casas por la Roma no manejo, pero sí tengo estos *departamentos* ahí cerca, ¿te
-  servirían?". Confirma que el otro tipo le interesa antes de seguir.
+- **Tipo honesto y decisivo:** si el comprador YA dijo el tipo (p.ej. casa), NO se lo vuelvas a
+  preguntar ("¿buscas casa o depa?" cuando ya dijo casa = error). Búscalo con ese `housing_type`.
+  Si confirmas que de ESE tipo no hay en la zona, AFÍRMALO de frente y propón la alternativa como
+  afirmación, NO como pregunta abierta: "Por la Roma no manejo casas, ahí mi inventario es de
+  *departamentos* — ¿te sirve que te muestre departamentos, o prefieres casa en otra zona?".
+  Nunca insinúes que tienes casas ahí si no las tienes.
+- **Zonas ambiguas entre ciudades:** algunos nombres de colonia existen en varios estados
+  (p.ej. "Roma" está en CDMX y en Monterrey). Si `search_inventory` regresa `states_in_results`
+  con MÁS de un estado, NO mezcles ni te confundas: para zonas icónicas asume la obvia (la Roma,
+  la Condesa, Polanco → CDMX) o pregunta cortito "¿la Roma de CDMX o de Monterrey?". Cuando ya
+  sepas la ciudad, vuelve a buscar pasando `state` para anclar.
 - **Ubicaciones vagas o direccionales** ("el centro", "el sur", "la zona norte", "por allá"):
   NO las pases literal (no existe una colonia "sur"). Usa tu conocimiento de la geografía de
   México para traducirlas a alcaldías/municipios/colonias REALES, y crúzalo con `list_areas`
@@ -113,11 +130,14 @@ cierras la cita tú; un asesor humano concreta. Hablas en español de México, c
   tienes (amenidades completas, descripción, fechas, más modelos), usa `get_more_info` —entra al
   sitio en vivo— y responde con su `page_excerpt`. Si la página no carga (`page_status` ≠ "ok"),
   comparte el link y di que un asesor le dará el detalle.
-- Para `create_lead` necesitas como mínimo: el desarrollo elegido (`development_id`) y una
-  fecha/hora tentativa. El nombre ya viene del contacto de WhatsApp si no lo dan.
+- Para `create_lead` necesitas: **nombre del comprador (OBLIGATORIO)**, `development_id`,
+  `model_id` del modelo de interés, y fecha/hora tentativa. Sin nombre NO se agenda — pídelo.
 - Una fecha tentativa NO tiene que ser exacta: "el sábado", "este fin", "mañana en la tarde"
   son SUFICIENTES (guárdalas tal cual en `visit_date`/`visit_time`). NUNCA insistas en una
   fecha de calendario exacta — eso lo confirma el asesor después.
+- **Respeta los datos que YA te dieron.** Si el comprador ya dijo el tipo, la zona o el
+  presupuesto, NO se los vuelvas a preguntar — avanza con lo que tienes. Repreguntar algo que ya
+  dijo es molesto y se siente a que no le pusiste atención.
 - No pidas el mismo dato dos veces. Una vez que tienes el mínimo, captura el lead; no busques
   más precisión.
 """
@@ -172,6 +192,18 @@ async def search_inventory(
         bedrooms_min=bedrooms_min,
         budget_max=budget_max,
     )
+
+
+@agent.tool
+async def find_by_developer(ctx: RunContext[AgentDeps], name: str) -> dict:
+    """Busca desarrollos por nombre de DESARROLLADORA/marca (p.ej. "Atlas", "MiRA", "Vinte").
+
+    Úsala cuando el comprador pregunte "¿tienes algo de X?" o mencione una marca. Devuelve
+    `{found, developers:[{developer, developments:[...]}]}`. Si `found` es false, NO inventes:
+    dilo y ofrece buscar por zona/tipo/presupuesto. Tras mostrar los desarrollos, si menciona
+    recámaras/zona, profundiza (filtra o usa `get_development_detail` para ver modelos).
+    """
+    return ctx.deps.repo.find_by_developer(name)
 
 
 @agent.tool
@@ -282,15 +314,53 @@ async def create_lead(
 ) -> dict:
     """Registra el lead calificado y notifica al equipo interno (handoff de broker).
 
-    Llamar solo cuando el comprador eligió un desarrollo y propuso una visita tentativa.
-    `development_id` viene de `search_inventory`. El nombre cae al contacto de WhatsApp.
+    Llamar SOLO cuando ya tienes: (1) el NOMBRE del comprador (obligatorio — pídelo, no lo
+    adivines), (2) el `development_id` elegido, (3) el `model_id` del modelo de interés, y
+    (4) una fecha/hora tentativa. Si falta el nombre, esta tool te lo regresa para que lo pidas.
+
+    Args:
+        name: nombre del comprador. OBLIGATORIO — pídelo explícitamente antes de agendar.
+        model_id: id del modelo/prototipo de interés (de `get_development_detail`/`search_inventory`).
     """
     deps = ctx.deps
-    buyer_name = name or deps.contact_name
+
+    # El nombre es indispensable: no se cae al contacto de WhatsApp en silencio.
+    if not (name and name.strip()):
+        return {
+            "status": "falta_nombre",
+            "message": "Antes de agendar necesito el NOMBRE del comprador. Pídeselo "
+                       f"(puedes sugerir el de WhatsApp: {deps.contact_name or 's/n'}).",
+        }
+
+    detail = deps.repo.get_development(development_id) or {}
+    developer = deps.repo.developer_of(development_id)
+
+    # Si el desarrollo TIENE modelos, hay que saber cuál le interesa. Si no tiene
+    # (p.ej. preventa de lujo "a consultar"), se agenda sin modelo.
+    models = detail.get("models", [])
+    if models and not model_id:
+        return {
+            "status": "falta_modelo",
+            "message": "Este desarrollo tiene modelos. Muéstraselos (recámaras/precio) y "
+                       "pregúntale cuál le interesa; pásame su model_id antes de agendar.",
+            "modelos": [
+                {"model_id": m.get("model_id"), "name": m.get("name"),
+                 "bedrooms": m.get("bedrooms"), "price": m.get("price")}
+                for m in models
+            ],
+        }
+
+    # Resolver el nombre del modelo de interés (para el registro y el aviso).
+    model_name = None
+    if model_id:
+        model_name = next(
+            (m.get("name") for m in detail.get("models", []) if m.get("model_id") == model_id),
+            None,
+        )
 
     lead = Lead(
         wa_user=deps.wa_user,
-        name=buyer_name,
+        name=name.strip(),
         budget=budget,
         search_state=search_state,
         search_zone=search_zone,
@@ -307,10 +377,8 @@ async def create_lead(
     )
     lead_id = deps.leads.save(lead)
 
-    detail = deps.repo.get_development(development_id) or {}
-    developer = deps.repo.developer_of(development_id)
     notif = LeadNotification(
-        buyer_name=buyer_name,
+        buyer_name=name.strip(),
         wa_user=deps.wa_user,
         housing_type=housing_type,
         zone=search_zone or detail.get("zone"),
@@ -320,20 +388,27 @@ async def create_lead(
         horizon=horizon,
         development_name=detail.get("name"),
         developer_name=developer.name if developer else None,
+        model_name=model_name,
         visit_date=visit_date,
         visit_time=visit_time,
         developer_contact=deps.repo.sales_contact(development_id),
     )
-    try:
-        result = await send_lead_notification(deps.channel, notif, deps.settings)
-        notified = result.ok
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Falló la notificación interna del lead: %s", exc)
-        notified = False
+    # Correo del lead (documentación + a quién escribir + mensaje redactado). Blocking → hilo.
+    email_sent = await asyncio.to_thread(send_lead_email, notif, deps.settings)
+
+    # Notificación interna por WhatsApp (opcional: solo si hay número interno configurado).
+    notified = False
+    if deps.settings.internal_notify_number:
+        try:
+            result = await send_lead_notification(deps.channel, notif, deps.settings)
+            notified = result.ok
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Falló la notificación interna del lead: %s", exc)
 
     return {
         "lead_id": lead_id,
-        "status": "notificado" if notified else "nuevo",
+        "status": "notificado" if (email_sent or notified) else "nuevo",
+        "email_sent": email_sent,
         "internal_notified": notified,
         "development": detail.get("name"),
     }
