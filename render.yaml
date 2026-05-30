@@ -1,0 +1,53 @@
+# Deploy de Viviendin en Render (Blueprint).
+#
+# Patrón replicado de la integración en producción de rialtor (render.yaml).
+#
+# ⚠️ El repo de la organización NO se puede conectar a Render: espeja tu código a un
+#    repo personal y conecta Render a ese (ver README.md → "Deploying").
+#
+# Pasos:
+#   1. Mirror del repo a tu cuenta personal de GitHub.
+#   2. En Render: New → Blueprint → apunta a tu repo personal (lee este archivo).
+#   3. Llena los secretos (los marcados sync:false) en el dashboard de Render.
+#   4. Toma la URL pública (https://viviendin-whatsapp.onrender.com) y registra el
+#      webhook de Kapso apuntando a  <url>/webhooks/kapso  (events: whatsapp.message.received, v2).
+#
+# Para arrancar: deploya con el ECHO BOT (channel.demo_app) y verifica que llegan webhooks
+# en producción. Cuando el agente esté listo, cambia startCommand al app del agente
+# (p.ej. `uvicorn app:app ...`) que incluye build_webhook_router(channel, handler).
+
+services:
+  - type: web
+    name: viviendin-whatsapp
+    runtime: python
+    plan: starter          # 'starter' = always-on ($7/mes). 'free' se DUERME y pierde webhooks.
+    region: oregon
+    branch: main
+    # Echo-bot solo necesita las deps del canal. Cuando se integre el agente, cambiar a
+    # `pip install -r requirements.txt` (un requirements raíz que mezcle canal + agente).
+    buildCommand: pip install -r channel/requirements.txt
+    # ECHO BOT (para validar la conexión). Cambiar a `app:app` (o el módulo del agente) en prod:
+    startCommand: uvicorn channel.demo_app:app --host 0.0.0.0 --port $PORT --workers 2
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: KAPSO_API_KEY
+        sync: false
+      - key: KAPSO_API_BASE_URL
+        value: https://api.kapso.ai
+      - key: META_GRAPH_VERSION
+        value: v24.0
+      - key: KAPSO_PHONE_NUMBER_ID
+        sync: false
+      - key: KAPSO_WEBHOOK_SECRET
+        sync: false
+      - key: INTERNAL_NOTIFY_NUMBER
+        sync: false
+      # Cuando el agente esté integrado, agregar aquí sus secretos:
+      # - key: ANTHROPIC_API_KEY
+      #   sync: false
+      # - key: SUPABASE_URL
+      #   sync: false
+      # - key: SUPABASE_KEY
+      #   sync: false

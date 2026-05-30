@@ -1,5 +1,5 @@
 {
-  "project-name": "<FILL THIS>",
-  "project-oneliner": "<FILL THIS>",
-  "project-description": "<FILL THIS>"
+  "project-name": "Viviendin",
+  "project-oneliner": "Broker inmobiliario de vivienda nueva.",
+  "project-description": "Viviendin es un registro centralizado de vivienda nueva en México alimentado desde los sitios propios de las desarrolladoras (extracción con LLM), más un agente de WhatsApp que entiende qué busca el comprador, le muestra desarrollos reales que cumplen sus criterios (zona, presupuesto, recámaras, crédito) y captura un lead calificado con fecha de visita. Operamos como broker: el lead se entrega a nuestro equipo con el contacto de la desarrolladora para concretar la visita y cobrar comisión."
 }
